@@ -260,6 +260,16 @@ async function connect(cfg, { create = false } = {}) {
   } catch (e) {
     throw /^GitHub didn't let/.test(e.message) ? e : stepErr('preparing the repository', e);
   }
+  // Verify the token can actually write (creating a tiny unreferenced blob is harmless).
+  try {
+    await gh(`${R()}/git/blobs`, { method: 'POST', body: { content: '', encoding: 'utf-8' } });
+  } catch (e) {
+    if (e.status === 403 || e.status === 404) {
+      throw new Error(`This token can read ${cfg.owner}/${cfg.repo} but is not allowed to save to it. ` +
+        'On github.com → Settings → Developer settings → Fine-grained tokens, edit the token and set Contents to "Read and write".');
+    }
+    throw stepErr('checking write access', e);
+  }
 }
 
 // ---------------------------------------------------------------- library model
