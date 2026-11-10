@@ -219,6 +219,10 @@ async function ensureInitialized() {
       });
       return;
     } catch (e) {
+      if (e.status === 403 || e.status === 404) {
+        throw new Error(`GitHub didn't let the app add the first file to the empty repository ${S.cfg.owner}/${S.cfg.repo} (${e.message}). ` +
+          'Fix: on github.com open that repository, tap "Add a README" (or "creating a new file"), commit it, then tap Connect again.');
+      }
       if (e.status !== 422 && e.status !== 409) throw e; // README exists but ref not visible yet — retry
       await sleep(1500);
     }
@@ -228,12 +232,19 @@ async function ensureInitialized() {
 
 async function connect(cfg, { create = false } = {}) {
   S.cfg = cfg;
-  S.user = await gh('/user');
+  const stepErr = (what, e) => Object.assign(new Error(`While ${what}: ${e.message}`), { status: e.status });
+  try {
+    S.user = await gh('/user');
+  } catch (e) {
+    if (e.status === 401) throw e;
+    S.user = null; // only needed for display / creating repos
+  }
   let repo;
   try {
     repo = await gh(R());
   } catch (e) {
-    if (e.status !== 404) throw e;
+    if (e.status !== 404) throw stepErr('opening the repository', e);
+    if (!S.user) throw new Error(`Repository ${cfg.owner}/${cfg.repo} was not found, or this token can't access it.`);
     if (!create) throw new Error(`Repository ${cfg.owner}/${cfg.repo} was not found, or this token can't access it.`);
     const body = { name: cfg.repo, private: true, auto_init: true, description: 'Photo & video backup (GitVault)' };
     const mine = cfg.owner.toLowerCase() === S.user.login.toLowerCase();
@@ -244,7 +255,11 @@ async function connect(cfg, { create = false } = {}) {
   if (repo.permissions && repo.permissions.push === false) throw new Error('You only have read access to this repository.');
   S.repoInfo = repo;
   S.branch = repo.default_branch || 'main';
-  await ensureInitialized();
+  try {
+    await ensureInitialized();
+  } catch (e) {
+    throw /^GitHub didn't let/.test(e.message) ? e : stepErr('preparing the repository', e);
+  }
 }
 
 // ---------------------------------------------------------------- library model
@@ -1006,7 +1021,7 @@ function bind() {
       await saveConfig(cfg, pw);
       $('#f-token').value = $('#f-pass').value = $('#f-pass2').value = '';
       showApp();
-      await loadLibrary();
+      await loadLibrary().catch(e => { throw new Error(`While reading your library: ${e.message}`); });
     } catch (err) {
       showSetup(err.message);
     } finally {
