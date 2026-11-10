@@ -1,0 +1,170 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#0e1014">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="GitVault">
+  <title>GitVault</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- ============ Setup / sign-in ============ -->
+<section id="setup" class="setup" hidden>
+  <div class="card">
+    <div class="brand big"><img src="icons/icon.svg" alt=""> GitVault</div>
+    <p class="lede">Back up the photos and videos from your iPhone into a private GitHub repository, and browse them from anywhere.</p>
+    <form id="setup-form" autocomplete="off">
+      <label>GitHub access token
+        <input id="f-token" type="password" required spellcheck="false" autocapitalize="off" placeholder="github_pat_…">
+      </label>
+      <p class="hint">Create a <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">fine-grained token</a>
+        limited to your photo repository with <b>Contents: Read and write</b>. The token is stored only on this device.</p>
+      <label>Repository
+        <input id="f-repo" required spellcheck="false" autocapitalize="off" placeholder="your-username/my-photos">
+      </label>
+      <p class="hint">Easiest: first create an empty <b>private</b> repository on github.com, then enter it here.</p>
+      <label class="check"><input type="checkbox" id="f-create"> Create it as a private repository if it doesn't exist <span class="muted">(token also needs Administration: write)</span></label>
+      <label>App password
+        <input id="f-pass" type="password" required minlength="6" autocomplete="new-password" placeholder="At least 6 characters">
+      </label>
+      <label>Confirm app password
+        <input id="f-pass2" type="password" required minlength="6" autocomplete="new-password">
+      </label>
+      <p class="hint">You'll need this password every time you open the album. It encrypts your token on this device — if you forget it, just reset and enter the token again (your photos stay safe).</p>
+      <button type="submit" class="btn primary wide" id="f-submit">Connect</button>
+      <p id="setup-error" class="error" hidden></p>
+    </form>
+  </div>
+</section>
+
+<!-- ============ Lock screen ============ -->
+<section id="lock" class="setup" hidden>
+  <div class="card lock-card">
+    <div class="lock-ico"><svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+    <h1>GitVault is locked</h1>
+    <p class="muted" id="lock-repo"></p>
+    <form id="lock-form" autocomplete="off">
+      <input id="l-pass" type="password" required autocomplete="current-password" placeholder="App password" aria-label="App password">
+      <button type="submit" class="btn primary wide" id="l-submit">Unlock</button>
+      <p id="lock-error" class="error" hidden></p>
+    </form>
+    <button id="l-forgot" class="btn ghost small">Forgot password?</button>
+  </div>
+</section>
+
+<!-- ============ Main app ============ -->
+<div id="app" hidden>
+  <header class="topbar">
+    <div class="brand"><img src="icons/icon.svg" alt=""> <span>GitVault</span></div>
+    <div class="spacer"></div>
+    <button id="btn-refresh" class="icon-btn" title="Refresh" aria-label="Refresh">
+      <svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.34 5.66M20 4v7h-7"/></svg>
+    </button>
+    <button id="btn-lock" class="icon-btn" title="Lock" aria-label="Lock">
+      <svg viewBox="0 0 24 24"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+    </button>
+    <button id="btn-settings" class="icon-btn" title="Settings" aria-label="Settings">
+      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </header>
+
+  <div class="toolbar">
+    <div class="seg" id="filters">
+      <button data-filter="all" class="active">All</button>
+      <button data-filter="image">Photos</button>
+      <button data-filter="video">Videos</button>
+    </div>
+    <div class="spacer"></div>
+    <button id="btn-select" class="btn ghost">Select</button>
+  </div>
+  <div id="stats" class="stats"></div>
+  <div id="banner" class="banner" hidden></div>
+
+  <main id="gallery" class="gallery"></main>
+  <div id="loading" class="center-msg" hidden><div class="spinner"></div>Loading your library…</div>
+  <div id="empty" class="center-msg" hidden>
+    <svg viewBox="0 0 24 24" class="empty-ico"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m21 15-5-5L5 19"/></svg>
+    <p><b>Nothing backed up yet.</b><br>Tap <b>Upload</b> to choose photos and videos from your library.</p>
+  </div>
+
+  <div id="selbar" class="selbar" hidden>
+    <span id="sel-count">0 selected</span>
+    <div class="spacer"></div>
+    <button id="sel-download" class="btn">Download</button>
+    <button id="sel-delete" class="btn danger">Delete</button>
+    <button id="sel-cancel" class="btn ghost">Done</button>
+  </div>
+
+  <label class="fab" id="fab">
+    <svg viewBox="0 0 24 24"><path d="M12 19V5M5 12l7-7 7 7"/></svg>
+    <span>Upload</span>
+    <input id="file-input" type="file" accept="image/*,video/*" multiple hidden>
+  </label>
+
+  <aside id="uploads" class="uploads" hidden>
+    <header>
+      <b id="up-title">Uploading</b>
+      <div class="spacer"></div>
+      <button id="up-toggle" class="btn ghost small">Hide</button>
+    </header>
+    <p class="up-note" id="up-note">Keep this page open until the upload finishes.</p>
+    <ul id="upload-list"></ul>
+  </aside>
+</div>
+
+<!-- ============ Viewer ============ -->
+<div id="viewer" class="viewer" hidden>
+  <div class="v-top">
+    <button id="v-close" class="icon-btn light" aria-label="Close"><svg viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></svg></button>
+    <div class="v-info"><div id="v-title"></div><div id="v-meta"></div></div>
+    <button id="v-download" class="icon-btn light" aria-label="Download"><svg viewBox="0 0 24 24"><path d="M12 4v12m-5-5 5 5 5-5M5 20h14"/></svg></button>
+    <button id="v-delete" class="icon-btn light" aria-label="Delete"><svg viewBox="0 0 24 24"><path d="M4 7h16M10 11v6m4-6v6M6 7l1 13h10l1-13M9 7V4h6v3"/></svg></button>
+  </div>
+  <div id="v-stage" class="v-stage"></div>
+  <button id="v-prev" class="v-nav prev" aria-label="Previous"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg></button>
+  <button id="v-next" class="v-nav next" aria-label="Next"><svg viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></svg></button>
+</div>
+
+<!-- ============ Settings ============ -->
+<dialog id="settings">
+  <h2>Settings</h2>
+  <dl id="settings-info"></dl>
+  <p class="hint">Deleting a photo removes it from the repository's files, but Git keeps it in the repository's history, so the repository size does not go down.</p>
+  <div class="row">
+    <a id="s-open" class="btn" target="_blank" rel="noopener">Open on GitHub</a>
+    <button id="s-password" class="btn">Change password</button>
+    <button id="s-logout" class="btn danger">Disconnect</button>
+    <div class="spacer"></div>
+    <button id="s-close" class="btn primary">Close</button>
+  </div>
+</dialog>
+
+<dialog id="pw-dialog">
+  <h2>Change app password</h2>
+  <form id="pw-form" autocomplete="off">
+    <label>Current password <input id="pw-cur" type="password" required autocomplete="current-password"></label>
+    <label>New password <input id="pw-new" type="password" required minlength="6" autocomplete="new-password"></label>
+    <label>Confirm new password <input id="pw-new2" type="password" required minlength="6" autocomplete="new-password"></label>
+    <p id="pw-error" class="error" hidden></p>
+    <div class="row">
+      <div class="spacer"></div>
+      <button type="button" id="pw-cancel" class="btn">Cancel</button>
+      <button type="submit" class="btn primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="drop" class="drop" hidden><div>Drop photos &amp; videos to upload</div></div>
+<div id="toast" class="toast" hidden></div>
+
+<script src="app.js" type="module"></script>
+</body>
+</html>
