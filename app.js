@@ -880,6 +880,8 @@ function renderGallery() {
   g.append(frag);
 
   $('#empty').hidden = S.items.length > 0;
+  $('#btn-select').hidden = !S.items.length;
+  if (!S.items.length && S.selecting) setSelecting(false);
   const photos = S.items.filter(i => i.kind === 'image').length;
   const total = S.items.reduce((s, i) => s + i.size, 0);
   $('#stats').textContent = S.items.length
