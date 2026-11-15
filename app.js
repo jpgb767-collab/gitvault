@@ -10,7 +10,9 @@
 const API = 'https://api.github.com';
 const MEDIA_DIR = 'media';
 const THUMB_DIR = 'thumbs';
-const CHUNK = 45 * 1024 * 1024;          // stay well under GitHub's 50 MB warning / 100 MB hard limit
+const CHUNK = 20 * 1024 * 1024;          // part size for large files (GitHub's hard limit is 100 MB per file)
+const LEGACY_CHUNK = 45 * 1024 * 1024;   // part size used by earlier versions (for duplicate detection)
+const PARALLEL_BLOBS = 3;                // simultaneous uploads
 const MAX_FILE = 2 * 1024 * 1024 * 1024; // browser memory is the practical limit
 const BATCH_FILES = 10;
 const BATCH_BYTES = 150 * 1024 * 1024;
@@ -158,7 +160,12 @@ function postBlobOnce(b64, onProgress) {
     if (onProgress) x.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded / e.total);
     x.onload = () => {
       if (x.status >= 200 && x.status < 300) resolve(x.response);
-      else reject(new GHError(x.status, explain(x.status, x.response?.message, x.getResponseHeader('x-ratelimit-remaining') === '0')));
+      else {
+        const err = new GHError(x.status, explain(x.status, x.response?.message, x.getResponseHeader('x-ratelimit-remaining') === '0'));
+        err.secondary = /secondary rate|abuse/i.test(x.response?.message || '');
+        err.retryAfter = +x.getResponseHeader('retry-after') || 0;
+        reject(err);
+      }
     };
     x.onerror = () => reject(new GHError(0, 'Network error during upload'));
     x.send(JSON.stringify({ content: b64, encoding: 'base64' }));
@@ -169,6 +176,7 @@ async function postBlob(b64, onProgress) {
     try { return await postBlobOnce(b64, onProgress); }
     catch (e) {
       if (attempt < 3 && (e.status === 0 || e.status >= 500)) { await sleep(2000 * 2 ** attempt); continue; }
+      if (attempt < 3 && e.secondary) { await sleep((e.retryAfter || 60) * 1000); continue; } // GitHub asked us to slow down
       throw e;
     }
   }
@@ -202,7 +210,7 @@ const REPO_README = `# Photo & video backup
 This repository is managed by GitVault.
 
 - \`media/YYYY/MM/\` — original photos and videos, named by capture date.
-  Files larger than 45 MB are stored as \`<name>.parts/part-000\`, \`part-001\`, …
+  Files larger than 20 MB are stored as \`<name>.parts/part-000\`, \`part-001\`, …
   (join them in order to get the original file back, e.g. \`cat part-* > video.mov\`).
 - \`thumbs/\` — small preview images used by the gallery.
 `;
@@ -377,6 +385,7 @@ function limiter(n) {
   return fn => new Promise((res, rej) => { q.push({ fn, res, rej }); next(); });
 }
 const fetchLimit = limiter(6);
+const blobLimit = limiter(PARALLEL_BLOBS);
 
 async function fetchBlob(sha) {
   const res = await fetchLimit(() => gh(`${R()}/git/blobs/${sha}`, { accept: 'application/vnd.github.raw+json', raw: true }));
@@ -612,9 +621,10 @@ async function prepare(job) {
 
   row.status('Checking…');
   const nParts = Math.max(1, Math.ceil(file.size / CHUNK));
-  const firstBuf = await file.slice(0, Math.min(file.size, CHUNK)).arrayBuffer();
-  const key = await gitBlobSha(firstBuf);
-  if (S.shas.has(key) || S.pending.has(key)) {
+  const key = await gitBlobSha(await file.slice(0, Math.min(file.size, CHUNK)).arrayBuffer());
+  // Files uploaded by earlier versions were split at 45 MB — check that fingerprint too.
+  const legacyKey = file.size > CHUNK ? await gitBlobSha(await file.slice(0, Math.min(file.size, LEGACY_CHUNK)).arrayBuffer()) : key;
+  if (S.shas.has(key) || S.pending.has(key) || S.shas.has(legacyKey)) {
     row.status('Already backed up', 'skip');
     return { job, skip: true };
   }
@@ -627,22 +637,34 @@ async function prepare(job) {
     job.path = path;
     const entries = [];
     const parts = [];
-    row.status(nParts > 1 ? `Uploading 1/${nParts}…` : 'Uploading…');
-    for (let i = 0; i < nParts; i++) {
-      if (nParts > 1) row.status(`Uploading ${i + 1}/${nParts}…`);
+    row.status('Uploading…');
+    const done = new Array(nParts).fill(0); // fraction uploaded per part
+    const started = Date.now();
+    const report = () => {
+      const frac = done.reduce((a, b) => a + b, 0) / nParts;
+      row.progress(frac * 0.95);
+      const secs = (Date.now() - started) / 1000;
+      if (file.size < 4e6 || secs < 2 || frac <= 0) return row.status(`Uploading ${Math.round(frac * 100)}%`);
+      const rate = frac * file.size / secs; // original-file bytes per second
+      const left = (1 - frac) * file.size / rate;
+      row.status(`${Math.round(frac * 100)}% · ${fmtSize(rate)}/s · ${fmtDuration(left)} left`);
+    };
+    await Promise.all(Array.from({ length: nParts }, (_, i) => blobLimit(async () => {
       const slice = file.slice(i * CHUNK, Math.min(file.size, (i + 1) * CHUNK));
-      const blob = await postBlob(await toBase64(slice), p => row.progress((i + p) / nParts * 0.95));
+      const blob = await postBlob(await toBase64(slice), p => { done[i] = p; report(); });
+      done[i] = 1; report();
       const repoPath = nParts > 1 ? `${path}.parts/part-${String(i).padStart(3, '0')}` : path;
-      entries.push({ path: repoPath, mode: '100644', type: 'blob', sha: blob.sha });
-      parts.push({ sha: blob.sha, size: slice.size, path: repoPath });
-    }
+      entries[i] = { path: repoPath, mode: '100644', type: 'blob', sha: blob.sha };
+      parts[i] = { sha: blob.sha, size: slice.size, path: repoPath };
+    })));
 
     let thumbSha = null;
     try {
       row.status('Making preview…');
       const t = await makeThumb(file, kind);
       if (t) {
-        thumbSha = (await postBlob(await toBase64(t))).sha;
+        const tb64 = await toBase64(t);
+        thumbSha = (await blobLimit(() => postBlob(tb64))).sha;
         entries.push({ path: thumbPath(path), mode: '100644', type: 'blob', sha: thumbSha });
       }
     } catch (e) { console.warn('No thumbnail for', file.name, e); }
@@ -798,6 +820,12 @@ function fmtSize(b) {
   let i = -1;
   do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
   return `${b.toFixed(b < 10 ? 1 : 0)} ${u[i]}`;
+}
+function fmtDuration(s) {
+  if (!isFinite(s)) return '…';
+  if (s < 60) return `${Math.max(1, Math.round(s))} s`;
+  if (s < 3600) return `${Math.round(s / 60)} min`;
+  return `${Math.floor(s / 3600)} h ${Math.round((s % 3600) / 60)} min`;
 }
 const monthFmt = new Intl.DateTimeFormat(undefined, { month: 'long', year: 'numeric' });
 const dateFmt = new Intl.DateTimeFormat(undefined, { dateStyle: 'medium', timeStyle: 'short' });
@@ -1198,6 +1226,11 @@ async function boot() {
     navigator.serviceWorker.register('sw.js').catch(() => {});
   }
   try { localStorage.removeItem('gitvault:v1'); sessionStorage.removeItem('gitvault:v1'); } catch {} // drop pre-password format
+  try { await navigator.storage?.persist?.(); } catch {} // ask the browser not to clear the saved sign-in
+  // On iPhone/iPad, Safari and the Home Screen app keep separate storage — say so when opened in a Safari tab.
+  const ios = /iPhone|iPad/.test(navigator.userAgent) || (/Macintosh/.test(navigator.userAgent) && navigator.maxTouchPoints > 1);
+  const standalone = navigator.standalone || matchMedia('(display-mode: standalone)').matches;
+  document.querySelectorAll('.pwa-hint').forEach(el => { el.hidden = !(ios && !standalone); });
   const saved = store.get();
   if (!saved?.sealed) return showSetup();
   showLock();
@@ -1243,7 +1276,7 @@ async function unlock(password) {
       await loadLibrary();
     } catch (e) {
       $('#loading').hidden = true;
-      if (e.status === 401 || e.status === 403 || e.status === 404) {
+      if (e.status === 401) {
         showSetup(`${e.message} Enter a new token to reconnect.`, cfg);
       } else {
         S.cfg = null;

@@ -5,7 +5,7 @@ A web app that saves the photos and videos from your iPhone into a **private Git
 ## Features
 - **Upload** from your iPhone photo library (HEIC, JPEG, PNG, MOV, MP4…). Original files are kept untouched.
 - **Timeline** grouped by month, using the real capture date read from the photo (EXIF) or video (QuickTime) metadata.
-- **Large videos:** files over 45 MB are split into parts automatically, because GitHub rejects any single file over 100 MB. They are joined again when you play or download them.
+- **Large videos:** files over 20 MB are split into parts automatically, because GitHub rejects any single file over 100 MB. They are joined again when you play or download them.
 - **No duplicates:** a photo you've already backed up is skipped.
 - **Thumbnails** are made on the phone during upload, so the gallery loads quickly.
 - **App password:** your GitHub token is stored on the device encrypted with your password (AES-256-GCM, key from PBKDF2-SHA256 with 310,000 iterations). The app auto-locks after 10 minutes of inactivity and has a manual **Lock** button.

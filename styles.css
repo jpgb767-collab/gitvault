@@ -91,6 +91,8 @@ label.check input { margin-top: 3px; }
 form .btn.wide { margin-top: 20px; }
 .error { color: var(--danger); margin: 12px 0 0; font-weight: 500; }
 
+.pwa-hint { font-size: 13px; text-align: left; background: color-mix(in srgb, var(--accent) 14%, var(--surface)); border-radius: 10px; padding: 10px 12px; margin: 12px 0; }
+
 /* ---------- lock screen ---------- */
 .lock-card { max-width: 360px; text-align: center; }
 .lock-card h1 { font-size: 20px; margin: 10px 0 2px; }
