@@ -18,6 +18,7 @@ const BATCH_FILES = 10;
 const BATCH_BYTES = 150 * 1024 * 1024;
 const THUMB_PX = 360;
 const STORE_KEY = 'gitvault:v2';
+const ALBUMS_FILE = 'albums.json';    // folders: { version, albums: [{ id, name, created, items: [media paths] }] }
 const AUTO_LOCK_MS = 10 * 60 * 1000;   // lock after 10 minutes without interaction
 const PBKDF2_ITER = 310000;
 
@@ -48,6 +49,9 @@ const S = {
   pending: new Set(), // content keys currently uploading
   reserved: new Set(),// paths taken or being uploaded
   filter: 'all',
+  albums: [],        // folders
+  mode: 'library',   // 'library' | 'folders' | 'folder'
+  folderId: null,
   view: [],
   selecting: false,
   selected: new Set(),
@@ -205,6 +209,68 @@ async function commitEntries(entries, message) {
   throw new Error('The repository kept changing while saving. Please try again.');
 }
 
+// ---------------------------------------------------------------- folders (stored in albums.json)
+function parseAlbums(text) {
+  try {
+    const j = JSON.parse(text);
+    return (Array.isArray(j.albums) ? j.albums : [])
+      .filter(a => a && typeof a.id === 'string' && typeof a.name === 'string')
+      .map(a => ({ id: a.id, name: a.name, created: a.created || null, items: Array.isArray(a.items) ? a.items.filter(p => typeof p === 'string') : [] }));
+  } catch { return []; }
+}
+async function readAlbumsAt(treeSha) {
+  const top = await gh(`${R()}/git/trees/${treeSha}`);
+  const e = top.tree.find(x => x.path === ALBUMS_FILE && x.type === 'blob');
+  return e ? parseAlbums(await (await fetchBlob(e.sha)).text()) : [];
+}
+/** Read the latest folders from GitHub, apply `fn`, save as one commit (safe if another device changed them meanwhile). */
+async function mutateAlbums(fn, message) {
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const head = await getHead();
+    const albums = await readAlbumsAt(head.treeSha);
+    const result = fn(albums);
+    const content = JSON.stringify({ version: 1, albums }, null, 2) + '\n';
+    const blob = await gh(`${R()}/git/blobs`, { method: 'POST', body: { content, encoding: 'utf-8' } });
+    const tree = await gh(`${R()}/git/trees`, { method: 'POST', body: { base_tree: head.treeSha, tree: [{ path: ALBUMS_FILE, mode: '100644', type: 'blob', sha: blob.sha }] } });
+    const commit = await gh(`${R()}/git/commits`, { method: 'POST', body: { message, tree: tree.sha, parents: [head.commitSha] } });
+    try {
+      await gh(`${R()}/git/refs/heads/${S.branch}`, { method: 'PATCH', body: { sha: commit.sha, force: false } });
+      S.albums = albums;
+      return result;
+    } catch (e) {
+      if (e.status !== 422 && e.status !== 409) throw e;
+      await sleep(700 * (attempt + 1));
+    }
+  }
+  throw new Error('The repository kept changing while saving. Please try again.');
+}
+const newId = () => Math.random().toString(36).slice(2, 10);
+const folderById = id => S.albums.find(a => a.id === id);
+
+async function createFolder(name) {
+  const id = newId();
+  await mutateAlbums(a => { a.push({ id, name, created: new Date().toISOString(), items: [] }); }, `Create folder "${name}"`);
+  return id;
+}
+async function addToFolder(id, paths) {
+  let added = 0;
+  const name = folderById(id)?.name || 'folder';
+  await mutateAlbums(albums => {
+    const f = albums.find(a => a.id === id);
+    if (!f) throw new Error('That folder no longer exists.');
+    const have = new Set(f.items);
+    for (const p of paths) if (!have.has(p)) { f.items.push(p); have.add(p); added++; }
+  }, `Add ${paths.length} item${paths.length > 1 ? 's' : ''} to "${name}"`);
+  return added;
+}
+async function removeFromFolder(id, paths) {
+  const gone = new Set(paths);
+  await mutateAlbums(albums => {
+    const f = albums.find(a => a.id === id);
+    if (f) f.items = f.items.filter(p => !gone.has(p));
+  }, `Remove ${paths.length} item${paths.length > 1 ? 's' : ''} from "${folderById(id)?.name || 'folder'}"`);
+}
+
 const REPO_README = `# Photo & video backup
 
 This repository is managed by GitVault.
@@ -213,6 +279,7 @@ This repository is managed by GitVault.
   Files larger than 20 MB are stored as \`<name>.parts/part-000\`, \`part-001\`, …
   (join them in order to get the original file back, e.g. \`cat part-* > video.mov\`).
 - \`thumbs/\` — small preview images used by the gallery.
+- \`albums.json\` — your folders (which photos and videos are in each one).
 `;
 
 async function ensureInitialized() {
@@ -364,6 +431,9 @@ async function loadLibrary() {
     sortItems();
     for (const p of S.byPath.keys()) S.reserved.add(p);
     S.truncated = !!tree.truncated;
+    const albumsEntry = tree.tree.find(e => e.path === ALBUMS_FILE && e.type === 'blob');
+    S.albums = albumsEntry ? parseAlbums(await (await fetchBlob(albumsEntry.sha)).text()) : [];
+    if (S.mode === 'folder' && !folderById(S.folderId)) S.mode = 'folders';
     S.repoInfo = await gh(R()).catch(() => S.repoInfo);
     renderGallery();
   } finally {
@@ -746,7 +816,8 @@ async function prepare(job) {
   const legacyKey = file.size > CHUNK ? await gitBlobSha(await file.slice(0, Math.min(file.size, LEGACY_CHUNK)).arrayBuffer()) : key;
   if (S.shas.has(key) || S.pending.has(key) || S.shas.has(legacyKey)) {
     row.status('Already backed up', 'skip');
-    return { job, skip: true };
+    const existing = S.items.find(i => i.key === key || i.key === legacyKey);
+    return { job, skip: true, existingPath: existing?.path };
   }
   S.pending.add(key);
   job.key = key;
@@ -833,6 +904,8 @@ async function uploadFiles(fileList) {
   if (cur.length) groups.push(cur);
 
   const prepLimit = limiter(2);
+  const targetFolder = S.mode === 'folder' ? S.folderId : null;
+  const folderPaths = [];
   let saved = 0, skipped = 0, failed = 0;
   for (const group of groups) {
     const prepared = (await Promise.all(group.map(j => prepLimit(() => prepare(j)).catch(err => {
@@ -842,6 +915,7 @@ async function uploadFiles(fileList) {
     })))).filter(Boolean);
     const ready = prepared.filter(p => !p.skip);
     skipped += prepared.length - ready.length;
+    prepared.forEach(p => p.skip && p.existingPath && folderPaths.push(p.existingPath));
     if (!ready.length) continue;
     ready.forEach(p => p.job.row.status('Saving…'));
     try {
@@ -850,6 +924,7 @@ async function uploadFiles(fileList) {
         S.items.push(p.item);
         if (p.thumbSha) S.thumbs.set(p.item.path, p.thumbSha);
         p.job.row.status('Backed up', 'ok');
+        folderPaths.push(p.item.path);
         saved++;
       }
       sortItems();
@@ -862,6 +937,10 @@ async function uploadFiles(fileList) {
     }
   }
 
+  if (targetFolder && folderPaths.length && folderById(targetFolder)) {
+    try { await addToFolder(targetFolder, folderPaths); renderGallery(); }
+    catch (e) { toast(`Saved, but couldn't add to the folder: ${e.message}`); }
+  }
   try { await wake?.release(); } catch {}
   S.uploads--;
   updateUploadTitle(true);
@@ -898,6 +977,10 @@ async function deleteItems(items) {
   S.items = S.items.filter(i => !gone.has(i.path));
   gone.forEach(p => { S.thumbs.delete(p); S.reserved.delete(p); S.selected.delete(p); });
   sortItems();
+  if (S.albums.some(a => a.items.some(p => gone.has(p)))) {
+    try { await mutateAlbums(albums => { for (const a of albums) a.items = a.items.filter(p => !gone.has(p)); }, 'Remove deleted items from folders'); }
+    catch (e) { console.warn('folder cleanup failed', e); }
+  }
   renderGallery();
   toast(`Deleted ${what}`);
   return true;
@@ -1007,8 +1090,17 @@ function placeholder(tile, item) {
   tile.prepend(d);
 }
 
+function currentItems() {
+  if (S.mode !== 'folder') return S.items;
+  const inFolder = new Set(folderById(S.folderId)?.items || []);
+  return S.items.filter(i => inFolder.has(i.path));
+}
+
 function renderGallery() {
-  S.view = S.items.filter(i => S.filter === 'all' || i.kind === S.filter);
+  renderChrome();
+  if (S.mode === 'folders') { renderFolders(); updateSelbar(); return; }
+  const base = currentItems();
+  S.view = base.filter(i => S.filter === 'all' || i.kind === S.filter);
   const g = $('#gallery');
   io.disconnect();
   g.textContent = '';
@@ -1037,9 +1129,12 @@ function renderGallery() {
   });
   g.append(frag);
 
-  $('#empty').hidden = S.items.length > 0;
-  $('#btn-select').hidden = !S.items.length;
-  if (!S.items.length && S.selecting) setSelecting(false);
+  $('#empty').hidden = base.length > 0;
+  $('#empty-text').innerHTML = S.mode === 'folder'
+    ? '<b>This folder is empty.</b><br>Tap <b>Upload</b> to add new photos and videos here, or go to your library, tap <b>Select</b>, and choose <b>Add to folder</b>.'
+    : '<b>Nothing backed up yet.</b><br>Tap <b>Upload</b> to choose photos and videos from your library.';
+  $('#btn-select').hidden = !base.length;
+  if (!base.length && S.selecting) setSelecting(false);
   const photos = S.items.filter(i => i.kind === 'image').length;
   const total = S.items.reduce((s, i) => s + i.size, 0);
   $('#stats').textContent = S.items.length
@@ -1057,13 +1152,137 @@ function setSelecting(on) {
   document.body.classList.toggle('selecting', on);
   document.querySelectorAll('.tile.sel').forEach(t => t.classList.toggle('sel', S.selected.has(t.dataset.path)));
   $('#btn-select').textContent = on ? 'Cancel' : 'Select';
+  $('#btn-folders').hidden = on || S.mode !== 'library';
+  if (on && !S.uploads) $('#uploads').hidden = true;
   updateSelbar();
 }
 function updateSelbar() {
   $('#selbar').hidden = !S.selecting;
   const n = S.selected.size;
   $('#sel-count').textContent = `${n} selected`;
-  $('#sel-download').disabled = $('#sel-delete').disabled = !n;
+  $('#sel-download').disabled = $('#sel-delete').disabled = $('#sel-folder').disabled = $('#sel-remove').disabled = !n;
+  $('#sel-remove').hidden = S.mode !== 'folder';
+}
+
+// ---------------------------------------------------------------- folders UI
+const FOLDER_ICON = '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+
+function renderChrome() {
+  const lib = S.mode === 'library';
+  $('#filters').hidden = S.mode === 'folders';
+  $('#btn-folders').hidden = !lib;
+  $('#stats').hidden = !lib;
+  $('#gallery').hidden = S.mode === 'folders';
+  $('#folders').hidden = S.mode !== 'folders';
+  $('#fab').hidden = S.mode === 'folders';
+  $('#navbar').hidden = lib;
+  if (S.mode === 'folders') {
+    $('#nav-back-label').textContent = 'Library';
+    $('#nav-title').textContent = 'Folders';
+    $('#nav-actions').hidden = true;
+    $('#empty').hidden = true;
+    $('#btn-select').hidden = true;
+    if (S.selecting) setSelecting(false);
+  } else if (S.mode === 'folder') {
+    const f = folderById(S.folderId);
+    $('#nav-back-label').textContent = 'Folders';
+    $('#nav-title').textContent = f ? f.name : '';
+    $('#nav-actions').hidden = false;
+  }
+}
+
+function renderFolders() {
+  const box = $('#folders');
+  box.textContent = '';
+  const grid = document.createElement('div');
+  grid.className = 'fgrid';
+  const add = document.createElement('button');
+  add.className = 'fcard new';
+  add.innerHTML = '<div class="fcover"><span class="plus">+</span></div><div class="fname">New folder</div><div class="fcount">&nbsp;</div>';
+  add.onclick = async () => {
+    const name = await askName('New folder', '', 'Create');
+    if (!name) return;
+    try { const id = await createFolder(name); openFolder(id); toast(`Folder "${name}" created`); }
+    catch (e) { toast(`Couldn't create the folder: ${e.message}`); }
+  };
+  grid.append(add);
+  const sorted = [...S.albums].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: 'base' }));
+  for (const f of sorted) {
+    const items = f.items.map(p => S.byPath.get(p)).filter(Boolean).sort((a, b) => b.date - a.date);
+    const card = document.createElement('button');
+    card.className = 'fcard';
+    card.innerHTML = '<div class="fcover tile"></div><div class="fname"></div><div class="fcount"></div>';
+    card.querySelector('.fname').textContent = f.name;
+    const photos = items.filter(i => i.kind === 'image').length;
+    card.querySelector('.fcount').textContent = items.length
+      ? [photos && `${photos} photo${photos > 1 ? 's' : ''}`, items.length - photos && `${items.length - photos} video${items.length - photos > 1 ? 's' : ''}`].filter(Boolean).join(' · ')
+      : 'Empty';
+    const cover = card.querySelector('.fcover');
+    if (items.length) { cover.dataset.path = items[0].path; io.observe(cover); }
+    else cover.innerHTML = `<span class="ficon">${FOLDER_ICON}</span>`;
+    card.onclick = () => openFolder(f.id);
+    grid.append(card);
+  }
+  box.append(grid);
+  if (!S.albums.length) {
+    const p = document.createElement('p');
+    p.className = 'center-msg small';
+    p.innerHTML = 'Create folders to organise photos and videos by subject — e.g. <b>Holidays</b>, <b>Family</b>, <b>Work</b>.<br>A photo can be in several folders; your library always keeps everything.';
+    box.append(p);
+  }
+}
+
+function setMode(mode, folderId = null) {
+  S.mode = mode;
+  S.folderId = folderId;
+  if (S.selecting) setSelecting(false);
+  S.filter = 'all';
+  document.querySelectorAll('#filters button').forEach(x => x.classList.toggle('active', x.dataset.filter === 'all'));
+  renderGallery();
+  window.scrollTo(0, 0);
+}
+const openFolder = id => setMode('folder', id);
+
+/** Small dialog asking for a folder name. Resolves to the trimmed name, or null if cancelled. */
+function askName(title, value, okLabel) {
+  const d = $('#name-dialog');
+  $('#name-title').textContent = title;
+  $('#name-ok').textContent = okLabel;
+  $('#name-input').value = value;
+  d.showModal();
+  setTimeout(() => $('#name-input').focus(), 50);
+  return new Promise(resolve => {
+    const finish = v => { d.onclose = null; $('#name-form').onsubmit = null; $('#name-cancel').onclick = null; if (d.open) d.close(); resolve(v); };
+    $('#name-form').onsubmit = e => { e.preventDefault(); const v = $('#name-input').value.trim().slice(0, 80); finish(v || null); };
+    $('#name-cancel').onclick = () => finish(null);
+    d.onclose = () => finish(null);
+  });
+}
+
+/** Dialog listing folders (+ new folder). Resolves to a folder id or null. */
+function pickFolder(count) {
+  const d = $('#pick-dialog');
+  $('#pick-title').textContent = `Add ${count} item${count > 1 ? 's' : ''} to…`;
+  const list = $('#pick-list');
+  list.textContent = '';
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = v => { if (settled) return; settled = true; d.onclose = null; if (d.open) d.close(); resolve(v); };
+    const mk = (label, cls, fn) => { const b = document.createElement('button'); b.type = 'button'; b.className = 'pick ' + cls; b.innerHTML = FOLDER_ICON + '<span></span>'; b.lastChild.textContent = label; b.onclick = fn; list.append(b); };
+    mk('New folder…', 'new', async () => {
+      settled = true; d.onclose = null; d.close();
+      const name = await askName('New folder', '', 'Create & add');
+      if (!name) return resolve(null);
+      try { resolve(await createFolder(name)); } catch (e) { toast(`Couldn't create the folder: ${e.message}`); resolve(null); }
+    });
+    for (const f of [...S.albums].sort((a, b) => a.name.localeCompare(b.name))) {
+      if (S.mode === 'folder' && f.id === S.folderId) continue;
+      mk(f.name, '', () => finish(f.id));
+    }
+    $('#pick-cancel').onclick = () => finish(null);
+    d.onclose = () => finish(null);
+    d.showModal();
+  });
 }
 
 // ---------------------------------------------------------------- viewer
@@ -1219,6 +1438,54 @@ function bind() {
   });
 
   $('#previews-btn').addEventListener('click', createMissingPreviews);
+
+  // folders
+  $('#btn-folders').addEventListener('click', () => setMode('folders'));
+  $('#nav-back').addEventListener('click', () => setMode(S.mode === 'folder' ? 'folders' : 'library'));
+  $('#nav-rename').addEventListener('click', async () => {
+    const f = folderById(S.folderId);
+    if (!f) return;
+    const name = await askName('Rename folder', f.name, 'Rename');
+    if (!name || name === f.name) return;
+    try {
+      await mutateAlbums(albums => { const x = albums.find(a => a.id === f.id); if (x) x.name = name; }, `Rename folder "${f.name}" to "${name}"`);
+      renderGallery();
+    } catch (e) { toast(`Rename failed: ${e.message}`); }
+  });
+  $('#nav-delete').addEventListener('click', async () => {
+    const f = folderById(S.folderId);
+    if (!f) return;
+    if (!confirm(`Delete the folder "${f.name}"?\n\nThe photos and videos in it are NOT deleted — they stay in your library.`)) return;
+    try {
+      await mutateAlbums(albums => { const i = albums.findIndex(a => a.id === f.id); if (i >= 0) albums.splice(i, 1); }, `Delete folder "${f.name}"`);
+      setMode('folders');
+      toast(`Folder "${f.name}" deleted`);
+    } catch (e) { toast(`Delete failed: ${e.message}`); }
+  });
+  $('#sel-folder').addEventListener('click', async () => {
+    const paths = [...S.selected];
+    const id = await pickFolder(paths.length);
+    if (!id) return;
+    try {
+      const added = await addToFolder(id, paths);
+      const name = folderById(id)?.name || 'folder';
+      setSelecting(false);
+      renderGallery();
+      toast(added === paths.length ? `Added to "${name}"` : `Added ${added} to "${name}" (${paths.length - added} already there)`,
+        { label: 'Open', fn: () => openFolder(id) }, 5000);
+    } catch (e) { toast(`Couldn't add: ${e.message}`); }
+  });
+  $('#sel-remove').addEventListener('click', async () => {
+    const paths = [...S.selected];
+    const f = folderById(S.folderId);
+    if (!f || !paths.length) return;
+    try {
+      await removeFromFolder(f.id, paths);
+      setSelecting(false);
+      renderGallery();
+      toast(`Removed ${paths.length} from "${f.name}" (still in your library)`);
+    } catch (e) { toast(`Couldn't remove: ${e.message}`); }
+  });
   $('#btn-refresh').addEventListener('click', () => loadLibrary().catch(err => toast(err.message)));
   $('#btn-select').addEventListener('click', () => setSelecting(!S.selecting));
   $('#sel-cancel').addEventListener('click', () => setSelecting(false));

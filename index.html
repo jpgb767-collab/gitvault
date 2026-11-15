@@ -78,6 +78,15 @@
     </button>
   </header>
 
+  <div id="navbar" class="navbar" hidden>
+    <button id="nav-back" class="btn ghost back"><svg viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></svg><span id="nav-back-label">Folders</span></button>
+    <h1 id="nav-title"></h1>
+    <div id="nav-actions" class="nav-actions">
+      <button id="nav-rename" class="btn ghost small">Rename</button>
+      <button id="nav-delete" class="btn ghost small danger">Delete folder</button>
+    </div>
+  </div>
+
   <div class="toolbar">
     <div class="seg" id="filters">
       <button data-filter="all" class="active">All</button>
@@ -85,6 +94,7 @@
       <button data-filter="video">Videos</button>
     </div>
     <div class="spacer"></div>
+    <button id="btn-folders" class="btn ghost"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> Folders</button>
     <button id="btn-select" class="btn ghost">Select</button>
   </div>
   <div id="stats" class="stats"></div>
@@ -95,18 +105,21 @@
   </div>
 
   <main id="gallery" class="gallery"></main>
+  <section id="folders" class="folders" hidden></section>
   <div id="loading" class="center-msg" hidden><div class="spinner"></div>Loading your library…</div>
   <div id="empty" class="center-msg" hidden>
     <svg viewBox="0 0 24 24" class="empty-ico"><rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="8.5" cy="10" r="1.5"/><path d="m21 15-5-5L5 19"/></svg>
-    <p><b>Nothing backed up yet.</b><br>Tap <b>Upload</b> to choose photos and videos from your library.</p>
+    <p id="empty-text"><b>Nothing backed up yet.</b><br>Tap <b>Upload</b> to choose photos and videos from your library.</p>
   </div>
 
   <div id="selbar" class="selbar" hidden>
-    <span id="sel-count">0 selected</span>
-    <div class="spacer"></div>
-    <button id="sel-download" class="btn">Download</button>
-    <button id="sel-delete" class="btn danger">Delete</button>
-    <button id="sel-cancel" class="btn ghost">Done</button>
+    <div class="sel-top"><span id="sel-count">0 selected</span><div class="spacer"></div><button id="sel-cancel" class="btn ghost">Done</button></div>
+    <div class="sel-actions">
+      <button id="sel-folder" class="btn"><svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg> Add to folder</button>
+      <button id="sel-remove" class="btn" hidden>Remove from folder</button>
+      <button id="sel-download" class="btn">Download</button>
+      <button id="sel-delete" class="btn danger">Delete</button>
+    </div>
   </div>
 
   <label class="fab" id="fab">
@@ -151,6 +164,24 @@
     <div class="spacer"></div>
     <button id="s-close" class="btn primary">Close</button>
   </div>
+</dialog>
+
+<dialog id="name-dialog">
+  <form id="name-form" autocomplete="off">
+    <h2 id="name-title">New folder</h2>
+    <input id="name-input" maxlength="80" required placeholder="e.g. Holidays, Family, Work" autocapitalize="words">
+    <div class="row">
+      <div class="spacer"></div>
+      <button type="button" id="name-cancel" class="btn">Cancel</button>
+      <button type="submit" id="name-ok" class="btn primary">Create</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="pick-dialog">
+  <h2 id="pick-title">Add to…</h2>
+  <div id="pick-list" class="pick-list"></div>
+  <div class="row"><div class="spacer"></div><button type="button" id="pick-cancel" class="btn">Cancel</button></div>
 </dialog>
 
 <dialog id="pw-dialog">
