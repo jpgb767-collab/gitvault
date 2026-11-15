@@ -4,10 +4,11 @@ A web app that saves the photos and videos from your iPhone into a **private Git
 
 ## Features
 - **Upload** from your iPhone photo library (HEIC, JPEG, PNG, MOV, MP4…). Original files are kept untouched.
+- **Folders** to organise photos and videos by subject (e.g. Holidays, Family). A photo can be in several folders; deleting a folder never deletes the photos. Folders are saved in `albums.json` in your photos repository, so they appear on every device.
 - **Timeline** grouped by month, using the real capture date read from the photo (EXIF) or video (QuickTime) metadata.
 - **Large videos:** files over 20 MB are split into parts automatically, because GitHub rejects any single file over 100 MB. They are joined again when you play or download them.
 - **No duplicates:** a photo you've already backed up is skipped.
-- **Thumbnails** are made on the phone during upload, so the gallery loads quickly.
+- **Thumbnails** are made on the phone during upload, so the gallery loads quickly. Videos uploaded without one get a **Create previews** button.
 - **App password:** your GitHub token is stored on the device encrypted with your password (AES-256-GCM, key from PBKDF2-SHA256 with 310,000 iterations). The app auto-locks after 10 minutes of inactivity and has a manual **Lock** button.
 - **Save back to the phone:** on iPhone, Download opens the share sheet, so you can choose *Save Image* or *Save Video*.
 - Can be installed on the iPhone home screen like a normal app.
@@ -45,5 +46,6 @@ Open that link in **Safari** → **Share** → **Add to Home Screen**. Open it f
 media/2024/03/20240302-101112_IMG_0003.MOV          original files, named by capture date
 media/2026/11/20261110-072743_IMG_0005.MOV.parts/   large videos split into parts
 thumbs/...                                         small previews used by the gallery
+albums.json                                        your folders
 ```
 To rebuild a split video by hand: `cat part-* > IMG_0005.MOV`

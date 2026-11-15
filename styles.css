@@ -269,3 +269,4 @@ dialog .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 18px; }
 .sel-actions { display: flex; gap: 8px; flex-wrap: wrap; }
 .sel-actions .btn { flex: 1 1 auto; justify-content: center; padding: 8px 10px; font-size: 14px; }
 .selecting .gallery { padding-bottom: calc(150px + var(--safe-bottom)); }
+.lock-logo { width: 88px; height: 88px; display: block; margin: 0 auto; border-radius: 20px; box-shadow: var(--shadow); }
