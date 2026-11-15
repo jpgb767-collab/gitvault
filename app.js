@@ -572,34 +572,154 @@ function loadImageEl(file) {
     img.src = url;
   });
 }
-function loadVideoFrame(file) {
-  return new Promise((resolve, reject) => {
-    const v = document.createElement('video');
-    const url = URL.createObjectURL(file);
-    const done = () => { v.removeAttribute('src'); v.load(); URL.revokeObjectURL(url); };
-    const timer = setTimeout(() => { done(); reject(new Error('video thumbnail timeout')); }, 12000);
-    v.muted = true; v.playsInline = true; v.preload = 'auto';
-    v.setAttribute('playsinline', ''); v.setAttribute('muted', '');
-    v.onloadeddata = () => { v.currentTime = Math.min(1, (v.duration || 0) / 10); };
-    v.onseeked = () => { clearTimeout(timer); resolve({ el: v, w: v.videoWidth, h: v.videoHeight, done }); };
-    v.onerror = () => { clearTimeout(timer); done(); reject(new Error('video decode')); };
+const waitFor = (el, ev, ms) => new Promise((resolve, reject) => {
+  const t = setTimeout(() => { el.removeEventListener(ev, on); reject(new Error(`timeout waiting for ${ev}`)); }, ms);
+  const on = () => { clearTimeout(t); resolve(); };
+  el.addEventListener(ev, on, { once: true });
+});
+
+/** Open a video and grab a frame. iPhone Safari only decodes frames after play(), and prefers
+ *  the element to be in the page, so do both (invisibly, muted). */
+async function loadVideoFrame(file, at = null) {
+  const typed = file.type ? file : new Blob([file], { type: mimeOf(file.name || '') });
+  const url = URL.createObjectURL(typed);
+  const v = document.createElement('video');
+  v.muted = true; v.defaultMuted = true; v.playsInline = true; v.preload = 'auto';
+  v.setAttribute('muted', ''); v.setAttribute('playsinline', ''); v.setAttribute('webkit-playsinline', '');
+  v.style.cssText = 'position:fixed;left:-10px;top:-10px;width:2px;height:2px;opacity:0;pointer-events:none';
+  document.body.append(v);
+  const done = () => { v.pause(); v.removeAttribute('src'); v.load(); v.remove(); URL.revokeObjectURL(url); };
+  try {
+    const failed = waitFor(v, 'error', 20000).then(() => { throw new Error('This browser cannot decode the video'); });
+    failed.catch(() => {});
     v.src = url;
     v.load();
-  });
-}
-async function makeThumb(file, kind) {
-  const src = kind === 'image' ? await loadImageEl(file) : await loadVideoFrame(file);
-  try {
-    if (!src.w || !src.h) return null;
-    const scale = Math.min(1, THUMB_PX / Math.min(src.w, src.h));
-    const c = document.createElement('canvas');
-    c.width = Math.max(1, Math.round(src.w * scale));
-    c.height = Math.max(1, Math.round(src.h * scale));
-    c.getContext('2d').drawImage(src.el, 0, 0, c.width, c.height);
-    return await new Promise(r => c.toBlob(r, 'image/jpeg', 0.72));
-  } finally {
-    src.done();
+    await Promise.race([waitFor(v, 'loadedmetadata', 15000), failed]);
+    try { await v.play(); } catch {}
+    v.pause();
+    const dur = isFinite(v.duration) ? v.duration : 0;
+    const target = at ?? Math.min(1, dur * 0.1);
+    if (target > 0 && Math.abs(v.currentTime - target) > 0.05) {
+      v.currentTime = target;
+      await Promise.race([waitFor(v, 'seeked', 8000), failed]);
+    } else if (v.readyState < 2) {
+      await Promise.race([waitFor(v, 'loadeddata', 8000), failed]);
+    }
+    // make sure a decoded frame is actually on screen
+    if (v.requestVideoFrameCallback) await Promise.race([new Promise(r => v.requestVideoFrameCallback(() => r())), sleep(600)]);
+    else await sleep(250);
+    if (!v.videoWidth) throw new Error('No video frame');
+    return { el: v, w: v.videoWidth, h: v.videoHeight, duration: dur, done };
+  } catch (e) {
+    done();
+    throw e;
   }
+}
+
+function isBlank(canvas) {
+  try {
+    const c = document.createElement('canvas');
+    c.width = c.height = 8;
+    const x = c.getContext('2d');
+    x.drawImage(canvas, 0, 0, 8, 8);
+    const d = x.getImageData(0, 0, 8, 8).data;
+    let max = 0;
+    for (let i = 0; i < d.length; i += 4) max = Math.max(max, d[i], d[i + 1], d[i + 2]);
+    return max < 12; // all black / transparent
+  } catch { return false; }
+}
+
+async function makeThumb(file, kind) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    // second try for videos: grab a frame further in (the first can be black)
+    const src = kind === 'image' ? await loadImageEl(file) : await loadVideoFrame(file);
+    try {
+      if (attempt && src.duration) {
+        src.el.currentTime = Math.min(src.duration * 0.5, 3);
+        await waitFor(src.el, 'seeked', 8000).catch(() => {});
+        await sleep(300);
+      }
+      if (!src.w || !src.h) return null;
+      const scale = Math.min(1, THUMB_PX / Math.min(src.w, src.h));
+      const c = document.createElement('canvas');
+      c.width = Math.max(1, Math.round(src.w * scale));
+      c.height = Math.max(1, Math.round(src.h * scale));
+      c.getContext('2d').drawImage(src.el, 0, 0, c.width, c.height);
+      if (kind === 'video' && isBlank(c) && attempt === 0) continue;
+      return await new Promise(r => c.toBlob(r, 'image/jpeg', 0.72));
+    } finally {
+      src.done();
+    }
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- previews for items uploaded without one
+const missingPreviews = () => S.items.filter(i =>
+  !S.thumbs.has(i.path) && (i.kind === 'video' || !PREVIEWABLE.test(i.mime) || i.size >= 6e6));
+
+async function createMissingPreviews() {
+  const todo = missingPreviews();
+  if (!todo.length || S.busy) return;
+  S.busy = true;
+  const btn = $('#previews-btn');
+  btn.disabled = true;
+  let wake = null;
+  try { wake = await navigator.wakeLock?.request('screen'); } catch {}
+  let made = 0, failed = 0, entries = [];
+  const added = [];
+  const flush = async () => {
+    if (!entries.length) return;
+    await commitEntries(entries, `Add ${entries.length} preview${entries.length > 1 ? 's' : ''}`);
+    for (const [path, sha] of added) S.thumbs.set(path, sha);
+    entries = []; added.length = 0;
+    renderGallery();
+  };
+  try {
+    for (let i = 0; i < todo.length; i++) {
+      const it = todo[i];
+      $('#previews-msg').textContent = `Creating previews ${i + 1} of ${todo.length}… keep the app open.`;
+      try {
+        if (it.size > 1.5e9) throw new Error('too large to preview on this device');
+        const blobs = [];
+        for (const p of it.parts) blobs.push(await fetchBlob(p.sha));
+        const file = new Blob(blobs, { type: it.mime });
+        blobs.length = 0;
+        const t = await makeThumb(file, it.kind);
+        if (!t) throw new Error('no frame');
+        const sha = (await postBlob(await toBase64(t))).sha;
+        entries.push({ path: thumbPath(it.path), mode: '100644', type: 'blob', sha });
+        added.push([it.path, sha]);
+        made++;
+        if (entries.length >= 5) await flush();
+      } catch (e) {
+        console.warn('preview failed for', it.path, e);
+        failed++;
+      }
+    }
+    await flush();
+  } catch (e) {
+    toast(`Saving previews failed: ${e.message}`);
+  } finally {
+    try { await wake?.release(); } catch {}
+    S.busy = false;
+    btn.disabled = false;
+    updatePreviewsBar();
+  }
+  toast(failed
+    ? `${made} preview${made === 1 ? '' : 's'} created · ${failed} couldn't be made${/iPhone|iPad|Macintosh/.test(navigator.userAgent) ? '' : ' (try on your iPhone)'}`
+    : `${made} preview${made === 1 ? '' : 's'} created`, null, 5000);
+}
+
+function updatePreviewsBar() {
+  const n = missingPreviews().length;
+  const bar = $('#previews');
+  bar.hidden = !n;
+  if (!n || S.busy) return;
+  const vids = missingPreviews().filter(i => i.kind === 'video').length;
+  $('#previews-msg').textContent = vids === n
+    ? `${n} video${n > 1 ? 's have' : ' has'} no preview picture yet.`
+    : `${n} item${n > 1 ? 's have' : ' has'} no preview picture yet.`;
 }
 
 // ---------------------------------------------------------------- uploading
@@ -926,6 +1046,7 @@ function renderGallery() {
     ? `${photos.toLocaleString()} photos · ${(S.items.length - photos).toLocaleString()} videos · ${fmtSize(total)}`
     : '';
   updateBanner();
+  updatePreviewsBar();
   updateSelbar();
 }
 
@@ -1097,6 +1218,7 @@ function bind() {
     }
   });
 
+  $('#previews-btn').addEventListener('click', createMissingPreviews);
   $('#btn-refresh').addEventListener('click', () => loadLibrary().catch(err => toast(err.message)));
   $('#btn-select').addEventListener('click', () => setSelecting(!S.selecting));
   $('#sel-cancel').addEventListener('click', () => setSelecting(false));
@@ -1194,10 +1316,10 @@ function bind() {
   // auto-lock after inactivity, or when the app was in the background for a while
   let lastActive = Date.now(), hiddenAt = 0;
   for (const ev of ['pointerdown', 'keydown', 'wheel', 'touchstart']) window.addEventListener(ev, () => { lastActive = Date.now(); }, { passive: true });
-  setInterval(() => { if (S.cfg && !S.uploads && Date.now() - lastActive > AUTO_LOCK_MS) lock(); }, 20000);
+  setInterval(() => { if (S.cfg && !S.uploads && !S.busy && Date.now() - lastActive > AUTO_LOCK_MS) lock(); }, 20000);
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) hiddenAt = Date.now();
-    else if (S.cfg && !S.uploads && hiddenAt && Date.now() - hiddenAt > AUTO_LOCK_MS / 2) lock();
+    else if (S.cfg && !S.uploads && !S.busy && hiddenAt && Date.now() - hiddenAt > AUTO_LOCK_MS / 2) lock();
   });
 
   // drag & drop (desktop)
@@ -1215,7 +1337,7 @@ function bind() {
   });
 
   window.addEventListener('beforeunload', e => {
-    if (S.uploads) { e.preventDefault(); e.returnValue = ''; }
+    if (S.uploads || S.busy) { e.preventDefault(); e.returnValue = ''; }
   });
 }
 
@@ -1291,7 +1413,7 @@ async function unlock(password) {
 
 /** Lock: reload the page so the token, images and URLs are wiped from memory. */
 function lock() {
-  if (S.uploads) return toast('Can\'t lock while an upload is running.');
+  if (S.uploads || S.busy) return toast('Can\'t lock while an upload is running.');
   S.cfg = null;
   location.reload();
 }

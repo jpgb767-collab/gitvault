@@ -118,6 +118,8 @@ form .btn.wide { margin-top: 20px; }
 }
 .seg button.active { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px rgba(0, 0, 0, .12); }
 .stats { padding: 8px 16px 0; color: var(--muted); font-size: 13px; }
+.banner.previews { display: flex; align-items: center; gap: 10px; background: var(--surface-2); }
+.banner.previews span { flex: 1; }
 .banner { margin: 10px 16px 0; padding: 10px 12px; border-radius: 10px; background: color-mix(in srgb, #f5a623 18%, var(--surface)); font-size: 13px; }
 
 /* ---------- gallery ---------- */
